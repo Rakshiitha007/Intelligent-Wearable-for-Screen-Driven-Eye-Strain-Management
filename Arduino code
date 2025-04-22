@@ -1,0 +1,146 @@
+IDE CODE                                                                #include <ESP8266WiFi.h>
+#include <WiFiClientSecure.h>
+#include <ESP8266HTTPClient.h>
+#include <ESP8266WebServer.h>
+
+// === WiFi Details ===
+const char* ssid = "srikanth";
+const char* password = "srikanth";
+
+// === SMS API Details ===
+const char* apikey = "ksXxuiHLZjvL";
+const char* templateID = "101";
+const char* mobileNumber = "917013716319";
+const char* var1 = "Driver Drowsy!";
+char var2[] = "CNN and IR Detection Confirmed";
+
+// === Pins ===
+#define IR_SENSOR_PIN D2
+#define VIBRATION_PIN D5
+#define BUZZER_PIN D6
+
+// === Detection Flags ===
+bool cnn_triggered = false;
+bool ir_triggered = false;
+unsigned long lastCNN = 0;
+unsigned long lastIR = 0;
+const unsigned long validWindow = 10000; // 10 sec
+
+// === Blink Tracking ===
+unsigned long lastBlinkTime = 0;
+int blinkCount = 0;
+const int blinkThreshold = 5;
+const unsigned long blinkWindow = 10000; // 10 sec
+unsigned long blinkWindowStart = 0;
+
+ESP8266WebServer server(80);
+
+void setup() {
+  Serial.begin(115200);
+  
+  pinMode(IR_SENSOR_PIN, INPUT);
+  pinMode(VIBRATION_PIN, OUTPUT);
+  pinMode(BUZZER_PIN, OUTPUT);
+
+  digitalWrite(VIBRATION_PIN, LOW);
+  digitalWrite(BUZZER_PIN, LOW);
+
+  // WiFi connect
+  WiFi.begin(ssid, password);
+  Serial.print("Connecting to WiFi");
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(1000);
+    Serial.print(".");
+  }
+  Serial.println("\nWiFi connected. IP address:");
+  Serial.println(WiFi.localIP());
+
+  // Handle CNN trigger
+  server.on("/cnn", []() {
+    cnn_triggered = true;
+    lastCNN = millis();
+    Serial.println("✅ CNN trigger received");
+    server.send(200, "text/plain", "CNN Trigger Acknowledged");
+  });
+
+  server.begin();
+}
+
+void loop() {
+  server.handleClient();
+  checkIRSensor();
+
+  if (cnn_triggered && ir_triggered &&
+      millis() - lastCNN < validWindow &&
+      millis() - lastIR < validWindow) {
+
+    Serial.println("🚨 BOTH CNN & IR DETECTED — Sending Alert");
+    triggerAlert();
+
+    cnn_triggered = false;
+    ir_triggered = false;
+  }
+}
+
+void checkIRSensor() {
+  if (digitalRead(IR_SENSOR_PIN) == LOW) {
+    if (millis() - lastBlinkTime > 300) {
+      blinkCount++;
+      lastBlinkTime = millis();
+    }
+  }
+
+  if (millis() - blinkWindowStart > blinkWindow) {
+    Serial.print("Blink Count in last 10s: ");
+    Serial.println(blinkCount);
+
+    if (blinkCount >= blinkThreshold) {
+      ir_triggered = true;
+      lastIR = millis();
+      Serial.println("✅ IR Blink Detection Triggered");
+    }
+
+    blinkCount = 0;
+    blinkWindowStart = millis();
+  }
+}
+
+void triggerAlert() {
+  digitalWrite(VIBRATION_PIN, HIGH);
+  digitalWrite(BUZZER_PIN, HIGH);
+  delay(1500);
+  digitalWrite(VIBRATION_PIN, LOW);
+  digitalWrite(BUZZER_PIN, LOW);
+
+  sendSMS();
+}
+
+void sendSMS() {
+  if (WiFi.status() == WL_CONNECTED) {
+    WiFiClientSecure client;
+    client.setInsecure();
+    HTTPClient http;
+
+    String payload = "{"
+                     "\"mobiles\":\"" + String(mobileNumber) + "\","
+                     "\"template_id\":\"" + String(templateID) + "\","
+                     "\"var1\":\"" + String(var1) + "\","
+                     "\"var2\":\"" + String(var2) + "\""
+                     "}";
+
+    Serial.println("📤 Sending SMS...");
+
+    http.begin(client, "https://www.circuitdigest.cloud/send_sms?ID=101");
+    http.addHeader("Content-Type", "application/json");
+    http.addHeader("Authorization", apikey);
+
+    int httpResponseCode = http.POST(payload);
+    if (httpResponseCode > 0) {
+      Serial.println("📨 SMS Sent! Response Code: " + String(httpResponseCode));
+    } else {
+      Serial.println("❌ Failed to Send SMS. Code: " + String(httpResponseCode));
+    }
+
+    http.end();
+  }
+}
